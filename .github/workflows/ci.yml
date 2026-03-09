@@ -1,0 +1,210 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Backend: Go ─────────────────────────────────────────────
+  backend:
+    name: Backend (Go)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: nexus-backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v4
+        with:
+          working-directory: nexus-backend
+          version: latest
+
+      - name: Unit tests
+        run: |
+          go test -race -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: nexus-backend/coverage.out
+          flags: backend
+
+  # ── Optimizer: Rust ──────────────────────────────────────────
+  optimizer:
+    name: Optimizer (Rust)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: nexus-logistics-optimizer
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: nexus-logistics-optimizer
+
+      - name: fmt check
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Tests
+        run: cargo test
+
+  # ── Blockchain: Solidity ─────────────────────────────────────
+  blockchain:
+    name: Blockchain (Solidity)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: nexus-blockchain
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: nexus-blockchain/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Compile contracts
+        run: npx hardhat compile
+
+      - name: Run tests
+        run: npx hardhat test
+
+      - name: Coverage
+        run: npx hardhat coverage
+
+  # ── Frontend: React + TS ─────────────────────────────────────
+  frontend:
+    name: Frontend (React)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: nexus-frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: nexus-frontend/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  # ── Security scans ───────────────────────────────────────────
+  security:
+    name: Security Scan
+    runs-on: ubuntu-24.04
+    permissions:
+      security-events: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          severity: CRITICAL,HIGH
+          format: sarif
+          output: trivy-results.sarif
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Go vulnerability check
+        working-directory: nexus-backend
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: Cargo audit
+        working-directory: nexus-logistics-optimizer
+        run: |
+          cargo install cargo-audit --locked 2>/dev/null || true
+          cargo audit
+
+  # ── Docker build check ───────────────────────────────────────
+  docker-build:
+    name: Docker Build Check
+    runs-on: ubuntu-24.04
+    needs: [backend, optimizer, frontend, blockchain]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./nexus-backend
+          push: false
+          tags: nexus-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build optimizer image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./nexus-logistics-optimizer
+          push: false
+          tags: nexus-optimizer:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./nexus-frontend
+          push: false
+          tags: nexus-frontend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

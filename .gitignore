@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+*.log
+*.out
+/nexus-backend/bin/
+/nexus-logistics-optimizer/target/
+/nexus-frontend/dist/
+/nexus-frontend/node_modules/
+/nexus-blockchain/node_modules/
+/nexus-blockchain/artifacts/
+/nexus-blockchain/cache/
+/tests/node_modules/
+/nexus-infrastructure/.terraform/
+*.tfstate
+*.tfstate.*

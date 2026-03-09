@@ -1,0 +1,51 @@
+---
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nexus
+  labels:
+    app.kubernetes.io/managed-by: helm
+
+---
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: nexus
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: "changeme_in_production"
+  DATABASE_URL: "postgres://nexus:changeme_in_production@postgres:5432/nexus?sslmode=require"
+
+---
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nexus-secrets
+  namespace: nexus
+type: Opaque
+stringData:
+  JWT_SECRET: "changeme_to_64_char_random_secret_please"
+
+  REDIS_PASSWORD: "changeme_redis_password_in_production"
+  ETHEREUM_RPC_URL: ""
+  SHIPMENT_CONTRACT_ADDRESS: ""
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nexus-config
+  namespace: nexus
+data:
+  APP_ENV: "production"
+  BACKEND_PORT: "8080"
+
+  OPTIMIZER_HOST: "nexus-optimizer"
+  OPTIMIZER_PORT: "9090"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+  LOG_LEVEL: "info"

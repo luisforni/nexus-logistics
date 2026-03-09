@@ -1,0 +1,146 @@
+version: "3.9"
+
+networks:
+  nexus-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  grafana-data:
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB:-nexus}
+      POSTGRES_USER:     ${POSTGRES_USER:-nexus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [nexus-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-nexus}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning --requirepass ${REDIS_PASSWORD:-devpassword}
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-devpassword}
+    volumes:
+      - redis-data:/data
+    networks: [nexus-net]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-devpassword}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nexus-backend:
+    build:
+      context: ../nexus-backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      APP_ENV:              ${APP_ENV:-production}
+      BACKEND_PORT:         8080
+      DATABASE_URL:         postgres://${POSTGRES_USER:-nexus}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-nexus}?sslmode=disable
+      REDIS_URL:            redis://:${REDIS_PASSWORD:-devpassword}@redis:6379
+      JWT_SECRET:           ${JWT_SECRET:?JWT_SECRET is required}
+      ETHEREUM_RPC_URL:     ${ETHEREUM_RPC_URL:-}
+      SHIPMENT_CONTRACT_ADDRESS: ${SHIPMENT_CONTRACT_ADDRESS:-}
+      OPTIMIZER_HOST:       nexus-optimizer
+      OPTIMIZER_PORT:       9090
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    networks: [nexus-net]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  nexus-optimizer:
+    build:
+      context: ../nexus-logistics-optimizer
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      OPTIMIZER_PORT: 9090
+      RUST_LOG:       info
+    ports:
+      - "9090:9090"
+      - "9091:9091"
+    networks: [nexus-net]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  nexus-frontend:
+    build:
+      context: ../nexus-frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      nexus-backend: { condition: service_healthy }
+    networks: [nexus-net]
+
+  hardhat-node:
+    image: node:20-alpine
+    working_dir: /app
+    command: sh -c "npm ci && npx hardhat node --hostname 0.0.0.0"
+    volumes:
+      - ../nexus-blockchain:/app
+    ports:
+      - "8545:8545"
+    networks: [nexus-net]
+    profiles: [dev]
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.97.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    networks: [nexus-net]
+
+  prometheus:
+    image: prom/prometheus:v2.50.1
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9001:9090"
+    networks: [nexus-net]
+
+  grafana:
+    image: grafana/grafana:10.3.4
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana-provisioning:/etc/grafana/provisioning
+    ports:
+      - "3000:3000"
+    depends_on: [prometheus]
+    networks: [nexus-net]
